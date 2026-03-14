@@ -14,14 +14,22 @@ import {
 import { detectTaskType, selectModel } from "@/lib/sal/router"
 import type { SessionVariables } from "@/lib/sal/injector"
 
+interface Attachment {
+  type: "image" | "file"
+  mimeType: string
+  url: string
+  name: string
+}
+
 export async function POST(req: Request) {
   try {
     const body = await req.json()
-    const { messages, sessionId, promptKey, variables } = body as {
+    const { messages, sessionId, promptKey, variables, attachments = [] } = body as {
       messages: { role: string; content: string; parts?: unknown[] }[]
       sessionId?: string
       promptKey?: string
       variables?: SessionVariables
+      attachments?: Attachment[]
     }
 
     // 1. Session setup
@@ -78,16 +86,40 @@ export async function POST(req: Request) {
     // Deduplicate — keep last N
     const deduped = allMessages.slice(-50)
 
-    // 5. Stream response
+    // 5. Build multi-modal messages if attachments present
+    const imageAttachments = attachments.filter(a => a.type === "image" && a.url)
+    
+    // Build messages array - add images to last user message if present
+    const modelMessages = deduped.map((m, idx) => {
+      const isLastUserMessage = idx === deduped.length - 1 && m.role === "user"
+      
+      if (isLastUserMessage && imageAttachments.length > 0) {
+        // Multi-modal message with images
+        return {
+          role: m.role as "user" | "assistant",
+          content: [
+            { type: "text" as const, text: m.content },
+            ...imageAttachments.map(img => ({
+              type: "image" as const,
+              image: img.url,
+            })),
+          ],
+        }
+      }
+      
+      return {
+        role: m.role as "user" | "assistant",
+        content: m.content,
+      }
+    })
+
+    // 6. Stream response
     const startTime = Date.now()
 
     const result = streamText({
       model,
       system: systemPrompt,
-      messages: deduped.map((m) => ({
-        role: m.role as "user" | "assistant",
-        content: m.content,
-      })),
+      messages: modelMessages,
       maxOutputTokens: 8096,
       temperature: 0.7,
     })
